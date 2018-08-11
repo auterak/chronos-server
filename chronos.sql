@@ -237,18 +237,20 @@ AS $$
   BEGIN
 	-- Otestování práv uživatele
 	PERFORM permission(usr, passwd, doc);
-	-- Otestování existence hodnoty
-    SELECT id FROM items WHERE items.value = _value INTO item;
-    IF item  IS NULL THEN
-		INSERT INTO items (value) VALUES (_value) RETURNING id INTO item;
-	END IF;
 	-- Otestování existence atributu
 	SELECT id FROM attrs WHERE attrs.name = _name  AND holder = doc INTO attr;
 	IF attr IS NULL THEN
+		-- Otestování existence hodnoty
+		SELECT id FROM items WHERE items.value = _value INTO item;
+		IF item  IS NULL THEN
+			INSERT INTO items (value) VALUES (_value) RETURNING id INTO item;
+		END IF;
 		INSERT INTO attrs (holder, name, container, link) VALUES (doc, _name, FALSE, _link) RETURNING id INTO attr;
+		-- Propojení atributu s hodnotou
+		INSERT INTO bindings (attr_id, item_id, doc_id, operation) VALUES(attr, item, NULL, 0);
+	ELSE
+		RAISE EXCEPTION 'Attribute % is not container', _name;
 	END IF;
-	-- Propojení atributu s hodnotou
-	INSERT INTO bindings (attr_id, item_id, doc_id, operation) VALUES(attr, item, NULL, 0);
   END
 $$ LANGUAGE  plpgsql;
 
