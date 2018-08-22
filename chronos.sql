@@ -1,4 +1,3 @@
--- Dropnutí tabulek, pokud již existují
 DROP TABLE IF EXISTS bindings;
 DROP TABLE IF EXISTS attrs;
 DROP TABLE IF EXISTS leasings;
@@ -6,7 +5,6 @@ DROP TABLE IF EXISTS docs;
 DROP TABLE IF EXISTS items;
 DROP TABLE IF EXISTS users;
 
--- Tabulka uživatelů
 CREATE TABLE users (
    id SERIAL PRIMARY KEY,
    name TEXT NOT NULL,
@@ -16,27 +14,23 @@ CREATE TABLE users (
    admin BOOLEAN NOT NULL
 );
 
--- Tabulka dokumentů
 CREATE TABLE docs
 (
   id SERIAL PRIMARY KEY,
   creator INTEGER NOT NULL
 );
 
--- Tabulka pronájmů
 CREATE TABLE leasings (
   lessee INTEGER REFERENCES users(id),
   doc_id INTEGER REFERENCES docs(id)
 );
 
--- Tabulka hodnot
 CREATE TABLE items
 (
   id SERIAL PRIMARY KEY,
   value TEXT NOT NULL
 );
 
--- Tabulka atributů
 CREATE TABLE attrs
 (
   id SERIAL PRIMARY KEY,
@@ -46,7 +40,6 @@ CREATE TABLE attrs
   link BOOLEAN NOT NULL
 );
 
--- Spojovací tabulka
 CREATE TABLE bindings
 (
   seqnum BIGSERIAL PRIMARY KEY,
@@ -57,7 +50,6 @@ CREATE TABLE bindings
   operation SMALLINT NOT NULL -- 0 set, 1 reset, 2 insert, 3 remove
 );
 
--- Dropnutí funkcí, pokud již existují
 DROP FUNCTION IF EXISTS create_user(TEXT, TEXT, BOOLEAN, INT, TEXT);
 DROP FUNCTION IF EXISTS create_first_user(TEXT);
 DROP FUNCTION IF EXISTS uid(TEXT);
@@ -66,7 +58,8 @@ DROP FUNCTION IF EXISTS permission(INTEGER, TEXT, INTEGER);
 DROP FUNCTION IF EXISTS user_name(INT);
 DROP FUNCTION IF EXISTS lease(INT, INT, TEXT, INT);
 DROP FUNCTION IF EXISTS remove_lease(INT, INT, TEXT, INT);
-DROP FUNCTION IF EXISTS insert_doc (INTEGER, TEXT);
+DROP FUNCTION IF EXISTS create_doc (INTEGER, TEXT);
+DROP FUNCTION IF EXISTS remove_doc(INTEGER, INTEGER, TEXT);
 DROP FUNCTION IF EXISTS set_attr(INTEGER, TEXT, TEXT, BOOLEAN, INTEGER, TEXT);
 DROP FUNCTION IF EXISTS reset_attr(INTEGER, TEXT, INTEGER, TEXT);
 DROP FUNCTION IF EXISTS remove_attr(INTEGER, TEXT, TEXT, INTEGER, TEXT);
@@ -82,43 +75,40 @@ DROP FUNCTION IF EXISTS get_scheme_id (doc INTEGER, usr INTEGER, passwd TEXT);
 DROP FUNCTION IF EXISTS get_name (doc INTEGER, usr INTEGER, passwd TEXT);
 DROP FUNCTION IF EXISTS has_shadow (doc INTEGER, usr INTEGER, passwd TEXT);
 
--- Funkce pro vytvoření uživatele
-CREATE FUNCTION create_user(name TEXT, passwd TEXT, 
-                            admin BOOLEAN, creator INT, 
-                            creatorPassword TEXT) 
-    RETURNS integer
+-- Function for creating a user
+CREATE FUNCTION create_user(name TEXT, passwd TEXT, admin BOOLEAN, creator INT, creatorPassword TEXT) 
+	RETURNS integer
 AS $$
-   DECLARE
-   	uid INT;
-   BEGIN
-   	-- Otestování údajů uživatele
-    PERFORM credentials(creator, creatorPassword, true);
-	-- Vložení uživatele do databáze
-    INSERT INTO users (name, password, creator, admin) 
-          VALUES (name, md5(name||passwd), creator, admin) RETURNING id INTO uid;
-    RETURN uid;          
+	DECLARE
+		uid INT;
+	BEGIN
+   		-- Creator credentials check
+    	PERFORM credentials(creator, creatorPassword, true);
+		-- User insertion into database
+    	INSERT INTO users (name, password, creator, admin) 
+        	VALUES (name, md5(name||passwd), creator, admin) RETURNING id INTO uid;
+    	RETURN uid;          
    END       
 $$ LANGUAGE plpgsql;
 
--- Funkce pro vytvoření prvního uživatele - bez kontroly údajů
+-- Function for creating first user - same as function above, but without credential check
 CREATE FUNCTION create_first_user(password TEXT) 
-    RETURNS integer
- AS $$
- 	-- Vložení uživatele do databáze
-    INSERT INTO users (name, password, creator, admin) 
-          VALUES ('admin', md5('admin'||password), -1, true) RETURNING id;
- $$ LANGUAGE SQL;
-
--- Funkce pro získání identifikátoru uživatele
-CREATE FUNCTION uid(usr TEXT)
-    RETURNS integer 
+	RETURNS integer
 AS $$
-    SELECT id FROM users WHERE name = usr;
+ 	-- User insertion into database
+	INSERT INTO users (name, password, creator, admin) 
+    	VALUES ('admin', md5('admin'||password), -1, true) RETURNING id;
+$$ LANGUAGE SQL;
+
+-- Function for obtaining user ID
+CREATE FUNCTION uid(usr TEXT)
+	RETURNS integer 
+AS $$
+	SELECT id FROM users WHERE name = usr;
 $$ LANGUAGE sql;
 
--- Funkce pro ověření údajů uživatele
-CREATE FUNCTION credentials(usr INTEGER, passwd TEXT, 
-                            ensureAdmin BOOLEAN DEFAULT false)
+-- Function for credential check
+CREATE FUNCTION credentials(usr INTEGER, passwd TEXT, ensureAdmin BOOLEAN DEFAULT false)
     RETURNS void
 AS $$
     DECLARE 
@@ -127,13 +117,13 @@ AS $$
     	isAdmin BOOLEAN;
     BEGIN
         PERFORM pg_sleep(0.1);
-		-- Získání a otestování existence uživatele
+		-- Obtaining and checking user existence in database
         SELECT name FROM users WHERE usr = id INTO uname;
         SELECT password FROM users WHERE usr = id INTO rpass;
 		IF uname IS NULL OR rpass <> md5(uname||passwd) THEN
 	   		RAISE EXCEPTION 'Invalid credentials';
 		END IF;
-		-- Otestování na administrátorská práva, pokud je to vyžadováno
+		-- Admin privileges check
 		IF ensureAdmin THEN
 			SELECT admin FROM users WHERE usr = id INTO isAdmin;
 			IF NOT isAdmin THEN
@@ -143,7 +133,7 @@ AS $$
     END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro zjištění práv k dokumentu
+-- Function for document privileges check
 CREATE FUNCTION permission(usr INTEGER, passwd TEXT, doc INTEGER)
     RETURNS void
 AS $$
@@ -151,11 +141,11 @@ AS $$
 		creator_id INTEGER;
 		leasingCount INTEGER;
     BEGIN
-		-- Otestování údajů
+		-- Credentials check
         PERFORM credentials(usr, passwd);
-		-- Získání tvůrce dokumentu
+		-- Obtaining document creator
 		SELECT creator FROM docs WHERE doc = id INTO creator_id;
-		-- Pokud je tvůrce různý od dotazovaného uživatele, testuje se, zda uživateli není dokument propůjčen, jinak vyvolá vyjímku
+		-- If user is not a creator, lease check is performed, otherwise exception
 		IF creator_id <> usr THEN
 	   		SELECT COUNT(*) FROM leasings WHERE usr = lessee AND doc = leasings.doc_id 
 	      		INTO leasingCount;
@@ -166,191 +156,203 @@ AS $$
     END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro získání jména uživatele
+-- Function for obtaining username
 CREATE FUNCTION user_name(uid INT) 
-   RETURNS TEXT
+	RETURNS TEXT
 AS $$
 	SELECT name FROM users WHERE uid = id;
 $$ LANGUAGE sql;
 
--- Funkce pro propůjčení dokumentu
+-- Function for creating a lease
 CREATE FUNCTION lease(doc INT, lessor INT, passwd TEXT, lssee INT)
     RETURNS void
 AS $$
 	DECLARE
     	ls INTEGER;
     BEGIN
-		-- Otestování práv k dokumentu
+		-- Document privileges check
     	PERFORM permission(lessor, passwd, doc);
-		-- Zajištění existence uživatele
+		-- User existence check
     	IF user_name(lssee) IS NULL THEN
        		RAISE EXCEPTION 'User % does not exist', lssee;
     	END IF;
-		-- Zjištění, zda už dokument není uživateli propůjčen
+		-- Lease existence check
     	SELECT lessee FROM leasings WHERE leasings.lessee = lssee AND leasings.doc_id = doc INTO ls;
     	IF ls IS NOT NULL THEN
     		RAISE EXCEPTION 'User % is already a lessee', ls;
     	END IF;
-		-- Vytvoření propůjčení
+		-- Lease creation
     	INSERT INTO leasings (lessee, doc_id) VALUES (lssee, doc);
     END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro odstranění propůjčení
+-- Function for removing a lease
 CREATE FUNCTION remove_lease(doc INT, lessor INT, passwd TEXT, lssee INT)
     RETURNS void
 AS $$
     BEGIN
-		-- Otestování práv k dokumentu
+		-- Document privileges check
     	PERFORM permission(lessor, passwd, doc);
-		-- Zajištění existence uživatele
+		-- User existence check
     	IF user_name(lssee) IS NULL THEN
        		RAISE EXCEPTION 'User % does not exist', lssee;
     	END IF;
-		-- Odstranění propůjčení
+		-- Lease deletion
     	DELETE FROM leasings WHERE leasings.lessee = lssee AND leasings.doc_id = doc;
     END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro vytvoření dokumentu
-CREATE FUNCTION insert_doc(creator INTEGER, passwd TEXT)
-  RETURNS INTEGER
+-- Function for creating a document
+CREATE FUNCTION create_doc(creator INTEGER, passwd TEXT)
+	RETURNS INTEGER
 AS $$
     DECLARE 
-    	rv INTEGER;
+    	did INTEGER;
     BEGIN
-		-- Otestování údajů uživatele
+		-- User credentials check
        	PERFORM credentials(creator, passwd);
-		-- Vložení dokumentu do databáze
-       	INSERT INTO docs (creator) VALUES (creator) RETURNING id INTO rv;
-       	RETURN rv;
+		-- Document creation
+       	INSERT INTO docs (creator) VALUES (creator) RETURNING id INTO did;
+       	RETURN did;
     END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro vložení nekontejnerového atributu
+-- Function for removing a document - to use only when attribute batch insertion fails
+CREATE FUNCTION remove_doc(doc INTEGER, creator INTEGER, passwd TEXT)
+	RETURNS void
+AS $$
+    BEGIN
+		-- Document privileges check
+       	PERFORM permission(creator, passwd, doc);
+		-- Document deletion
+		DELETE FROM docs WHERE docs.id = doc;
+    END
+$$ LANGUAGE plpgsql;
+
+-- Function for inserting non-container attributes
 CREATE FUNCTION set_attr(doc INTEGER, _name TEXT, _value TEXT, _link BOOLEAN, usr INTEGER, passwd TEXT) 
-  RETURNS void
+	RETURNS void
 AS $$
-  DECLARE
-     item INTEGER;
-     attr INTEGER;
-  BEGIN
-	-- Otestování práv uživatele
-	PERFORM permission(usr, passwd, doc);
-	-- Otestování existence atributu
-	SELECT id FROM attrs WHERE attrs.name = _name  AND holder = doc INTO attr;
-	IF attr IS NULL THEN
-		-- Otestování existence hodnoty
-		SELECT id FROM items WHERE items.value = _value INTO item;
-		IF item  IS NULL THEN
-			INSERT INTO items (value) VALUES (_value) RETURNING id INTO item;
+	DECLARE
+    	item INTEGER;
+    	attr INTEGER;
+	BEGIN
+		-- Document privileges check
+		PERFORM permission(usr, passwd, doc);
+		-- Attribute existence check
+		SELECT id FROM attrs WHERE attrs.name = _name  AND holder = doc INTO attr;
+		IF attr IS NULL THEN
+			-- Value existence check
+			SELECT id FROM items WHERE items.value = _value INTO item;
+			IF item  IS NULL THEN
+				INSERT INTO items (value) VALUES (_value) RETURNING id INTO item;
+			END IF;
+			INSERT INTO attrs (holder, name, container, link) VALUES (doc, _name, FALSE, _link) RETURNING id INTO attr;
+			-- Binding creation
+			INSERT INTO bindings (attr_id, item_id, doc_id, operation) VALUES(attr, item, NULL, 0);
+		ELSE
+			RAISE EXCEPTION 'Attribute % is not container', _name;
 		END IF;
-		INSERT INTO attrs (holder, name, container, link) VALUES (doc, _name, FALSE, _link) RETURNING id INTO attr;
-		-- Propojení atributu s hodnotou
-		INSERT INTO bindings (attr_id, item_id, doc_id, operation) VALUES(attr, item, NULL, 0);
-	ELSE
-		RAISE EXCEPTION 'Attribute % is not container', _name;
-	END IF;
-  END
+  	END
 $$ LANGUAGE  plpgsql;
 
--- Funkce pro odstranění atributu z dokumentu
+-- Function for removing attributes
 CREATE FUNCTION reset_attr(doc_id INTEGER, _name TEXT, usr INTEGER, passwd TEXT)
-  RETURNS void
+	RETURNS void
 AS $$
-  DECLARE
-    attr INTEGER;
-  BEGIN
-  	-- Otestování práv uživatele
-    PERFORM permission(usr, passwd, doc_id);
-	-- Otestování existence atributu v dokumentu
-    SELECT id FROM attrs WHERE attrs.name = _name  AND holder = doc_id INTO attr;
-    IF attr IS NULL THEN
-		RAISE EXCEPTION 'Unknown attribute % of document with id %', _name, doc_id;
-    END IF;
-	-- Odstranění atributu
-    INSERT INTO bindings (attr_id, item_id, doc_id, operation) VALUES(attr, NULL, NULL, 1);
-  END  
+	DECLARE
+    	attr INTEGER;
+	BEGIN
+  		-- Document privileges check
+    	PERFORM permission(usr, passwd, doc_id);
+		-- Attribute existence check
+    	SELECT id FROM attrs WHERE attrs.name = _name  AND holder = doc_id INTO attr;
+    	IF attr IS NULL THEN
+			RAISE EXCEPTION 'Unknown attribute % of document with id %', _name, doc_id;
+    	END IF;
+		-- Attribute deletion
+    	INSERT INTO bindings (attr_id, item_id, doc_id, operation) VALUES(attr, NULL, NULL, 1);
+	END  
 $$ LANGUAGE  plpgsql;
 
--- Funkce pro odstranění atributu z pole
+-- Function for removing attributes from container
 CREATE FUNCTION remove_attr(doc_id INTEGER, _name TEXT, _value TEXT, usr INTEGER, passwd TEXT)
-  RETURNS void
+	RETURNS void
 AS $$
-  DECLARE
-    attr INTEGER;
-    cont BOOLEAN;
-    item INTEGER;
-  BEGIN
-  	-- Otestování práv uživatele
-    PERFORM permission(usr, passwd, doc_id);
-	-- Otestování existence atributu a zda je kontejner
-    SELECT id, container INTO attr, cont FROM attrs WHERE attrs.name = _name  AND holder = doc_id;
-    IF attr IS NULL THEN
-		RAISE EXCEPTION 'Unknown attribute % of document with id %', _name, doc_id;
-    END IF;
-    IF NOT cont THEN
-    	RAISE EXCEPTION 'Attribute % of document % is not a container', _name, doc_id;
-    END IF;
-	-- Otestování existence hodnoty atributu
-    SELECT id FROM items WHERE items.value = _value INTO item;
-    IF item IS NULL THEN
-		RAISE EXCEPTION 'Unknown value % of attribute %', _value, _name;
-    END IF;
-	-- Odstranění atributu
-    INSERT INTO bindings (attr_id, item_id, doc_id, operation) VALUES(attr, item, NULL, 3);
-  END  
+	DECLARE
+    	attr INTEGER;
+    	cont BOOLEAN;
+    	item INTEGER;
+  	BEGIN
+  		-- Document privileges check
+    	PERFORM permission(usr, passwd, doc_id);
+		-- Attribute existence and if the attribute is a container check
+    	SELECT id, container INTO attr, cont FROM attrs WHERE attrs.name = _name  AND holder = doc_id;
+    	IF attr IS NULL THEN
+			RAISE EXCEPTION 'Unknown attribute % of document with id %', _name, doc_id;
+    	END IF;
+    	IF NOT cont THEN
+    		RAISE EXCEPTION 'Attribute % of document % is not a container', _name, doc_id;
+    	END IF;
+		-- Value existence check
+    	SELECT id FROM items WHERE items.value = _value INTO item;
+    	IF item IS NULL THEN
+			RAISE EXCEPTION 'Unknown value % of attribute %', _value, _name;
+    	END IF;
+		-- Attribute deletion
+    	INSERT INTO bindings (attr_id, item_id, doc_id, operation) VALUES(attr, item, NULL, 3);
+  	END  
 $$ LANGUAGE  plpgsql;
 
 -- Funkce pro vložení kontejnerového atributu
 CREATE FUNCTION insert_attr(doc INTEGER, _name TEXT, _value TEXT, _link BOOLEAN, usr INTEGER, passwd TEXT)
-  RETURNS void
+	RETURNS void
 AS $$
-  DECLARE
-     attr INTEGER;
-     cont BOOLEAN;
-     item INTEGER;
-  BEGIN
-  	-- Otestování práv uživatele
-    PERFORM permission(usr, passwd, doc);
-	-- Otestování existence atributu a zda je kontejner
-    SELECT id, container INTO attr, cont FROM attrs WHERE attrs.name = _name  AND holder = doc;
-    IF attr IS NULL THEN
-    	INSERT INTO attrs (holder, name, container, link) VALUES (doc, _name, TRUE, _link) RETURNING id, container INTO attr, cont;
-    END IF;
-    IF NOT cont THEN
-    	RAISE EXCEPTION 'Attribute % of document % is not a container', _name, doc;
-    END IF;
-	-- Otestování existence hodnoty atributu
-    SELECT id FROM items WHERE items.value = _value INTO item;
-    IF item  IS NULL THEN
-        INSERT INTO items (value) VALUES (_value) RETURNING id INTO item;
-    END IF;
-	-- Vložení atributu
-    INSERT INTO bindings (attr_id, item_id, doc_id, operation) VALUES(attr, item, NULL, 2);
-  END  
+	DECLARE
+    	attr INTEGER;
+    	cont BOOLEAN;
+    	item INTEGER;
+  	BEGIN
+  		-- Document privileges check
+    	PERFORM permission(usr, passwd, doc);
+		-- Attribute existence and if the attribute is a container check
+    	SELECT id, container INTO attr, cont FROM attrs WHERE attrs.name = _name  AND holder = doc;
+    	IF attr IS NULL THEN
+    		INSERT INTO attrs (holder, name, container, link) VALUES (doc, _name, TRUE, _link) RETURNING id, container INTO attr, cont;
+    	END IF;
+		IF NOT cont THEN
+    		RAISE EXCEPTION 'Attribute % of document % is not a container', _name, doc;
+    	END IF;
+		-- Value existence check
+    	SELECT id FROM items WHERE items.value = _value INTO item;
+    	IF item  IS NULL THEN
+        	INSERT INTO items (value) VALUES (_value) RETURNING id INTO item;
+    	END IF;
+		-- Attribute insertion
+    	INSERT INTO bindings (attr_id, item_id, doc_id, operation) VALUES(attr, item, NULL, 2);
+  	END  
 $$ LANGUAGE  plpgsql;
 
--- Funkce pro získání seznamu dokumentů daného uživatele
+-- Function for obtaining user's document list
 CREATE FUNCTION list_docs (usr INTEGER, passwd TEXT)
-  RETURNS TABLE(id INTEGER, name TEXT)
+	RETURNS TABLE(id INTEGER, name TEXT)
 AS $$
 	DECLARE
 		r RECORD;
     	a RECORD;
 	BEGIN
-		-- Ověření údajů uživatele
+		-- User credentials check
   		PERFORM credentials(usr, passwd);
-		-- Vytvoření dočasné tabulky
+		-- Temporary table creation
   		CREATE TEMP TABLE temp_docs(id INTEGER, name TEXT);
-		-- Procházení neduplicitních záznamů o dokumentech
+		-- Browsing distinct document records
   		FOR r IN SELECT DISTINCT docs.id 
   		   		FROM docs 
            		LEFT JOIN leasings ON docs.id = leasings.doc_id 
            		WHERE docs.creator = usr OR leasings.lessee = usr
            		ORDER BY docs.id
   		LOOP
-			-- Procházení atributů dokumentu a nalezení názvu
+			-- Browsing document attributes to find a name
   			FOR a IN SELECT * FROM scandocs(r.id, now()) LOOP
     			IF a.name = '_id' THEN
         			INSERT INTO temp_docs VALUES (r.id, a.value);
@@ -358,42 +360,42 @@ AS $$
         		END IF;
     		END LOOP;
   		END LOOP;
-		-- Vrácení všech uložených údajů
+		-- Returning all records and removing temporary table
   		RETURN QUERY SELECT * FROM temp_docs ORDER BY temp_docs.name;
   		DROP TABLE temp_docs;
   		RETURN;
 	END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro získání seznamu nájemníků
+-- Function for obtaining lessee list
 CREATE FUNCTION list_lessees (doc INTEGER, usr INTEGER, passwd TEXT)
-  RETURNS TABLE(id INTEGER, name TEXT)
+  	RETURNS TABLE(id INTEGER, name TEXT)
 AS $$
 	DECLARE
   		ctr INTEGER;
 	BEGIN
-		-- Otestování údajů uživatele
+		-- User credentials check
   		PERFORM credentials(usr, passwd);
-		-- Otestování, zda je uživatel tvůrce
+		-- Creator check
   		SELECT docs.id FROM docs WHERE docs.id = doc AND docs.creator = usr INTO ctr;
   		IF ctr IS NULL THEN
     		RAISE EXCEPTION 'User % is not the creator.', usr;
   		END IF;
-		-- Získání seznamu nájemníků
+		-- Obtaining lessee list
   		RETURN QUERY SELECT users.id, users.name FROM users JOIN leasings ON users.id = leasings.lessee WHERE leasings.doc_id = doc;
 	END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro získání seznamu atributů k určité časové značce
+-- Function for obtaining attribute list according to timestamp
 CREATE FUNCTION scandocs (doc INTEGER, deadline TIMESTAMPTZ)
-  RETURNS TABLE(name TEXT, value TEXT, container BOOLEAN, link BOOLEAN, holder INTEGER)
+  	RETURNS TABLE(name TEXT, value TEXT, container BOOLEAN, link BOOLEAN, holder INTEGER)
 AS $$
 	DECLARE
   		r RECORD;
 	BEGIN
-		-- Vytvoření dočasné tabulky pro uložení atributů
+		-- Temprorary attribute table creation
 		CREATE TEMP TABLE temp_attrs(name TEXT, value TEXT, container BOOLEAN, link BOOLEAN, holder INTEGER);
-		-- Procházení všech atributů podle operací při propojování s hodnotami
+		-- Browsing attributes
   		FOR r in SELECT attrs.name as name,
   				  		attrs.container as container,
                   		attrs.link as link,
@@ -409,35 +411,32 @@ AS $$
            		WHERE attrs.holder = doc AND bindings.btime <= deadline
           		ORDER BY btime ASC
   		LOOP
-			-- Operace je vložením nekontejnerového atributu
-      		IF r.operation = 0 THEN
+			-- Inserting container and non-container attributes operation
+      		IF r.operation = 0 OR r.operation = 2 THEN
 				INSERT INTO temp_attrs VALUES (r.name, r.value, r.container, r.link, r.holder);
-			-- Operace je odstraněním atributu
+			-- Removing attribute operation
       		ELSIF r.operation = 1 THEN
         		DELETE FROM temp_attrs WHERE temp_attrs.name = r.name;
-			-- Operace je vložením kontejnerového atributu
-      		ELSIF r.operation = 2 THEN
-				INSERT INTO temp_attrs VALUES (r.name, r.value, r.container, r.link, r.holder);
-			-- Operace je odstraněním (Kontejnerového) atributu z pole
+			-- Removing attribute from container operation
       		ELSIF r.operation = 3 THEN
 				DELETE FROM temp_attrs WHERE temp_attrs.name = r.name AND temp_attrs.value = r.value;
       		END IF;
   		END LOOP;
-		-- Vrácení všech získaných informací
+		-- Returning all records and removing temporary table
   		RETURN QUERY SELECT * FROM temp_attrs;
   		DROP TABLE temp_attrs;
   		RETURN;
 	END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro zjištění, zda je uživatel adminem
+-- Function for admin privileges check
 CREATE FUNCTION isAdmin(usr INTEGER)
     RETURNS BOOLEAN
 AS $$
     SELECT admin FROM users WHERE id = usr;
 $$ LANGUAGE sql;
 
--- Funkce pro zjištění, zda je uživatel tvůrcem dokumentu
+-- Function for document creator check
 CREATE FUNCTION isCreator(doc INTEGER, usr INTEGER)
     RETURNS BOOLEAN
 AS $$
@@ -453,19 +452,19 @@ BEGIN
 END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro získání seznamu uživatelů
+-- Function for obtaining user list
 CREATE FUNCTION list_users(usr INTEGER, passwd TEXT)
     RETURNS TABLE(name TEXT)
 AS $$
 	BEGIN
-		-- Otestování údajů uživatele
+		-- User credentials check
 		PERFORM credentials(usr, passwd);
-		-- Vrácení seznamu uživatelů
+		-- Returning user list
     	RETURN QUERY SELECT users.name FROM users WHERE id <> usr;
 	END;
 $$ LANGUAGE plpgsql;
 
--- Funkce pro získání seznamu všech (pojmenovaných) dokumentů
+-- Function for obtaining named documents list
 CREATE FUNCTION list_all_docs(usr INTEGER, passwd TEXT)
     RETURNS TABLE(id INTEGER, name TEXT)
 AS $$
@@ -473,17 +472,17 @@ AS $$
 		r RECORD;
     	a RECORD;
 	BEGIN
-		-- Otestování údajů uživatele
+		-- User credentials check
   		PERFORM credentials(usr, passwd);
-		-- Vytvoření dočasné tabulky pro uložení informací
+		-- Temporary table creation
   		CREATE TEMP TABLE temp_docs(id INTEGER, name TEXT);
-		-- Procházení neduplicitních záznamů o dokumentech
+		-- Browsing distinct document records
   		FOR r IN SELECT DISTINCT docs.id 
   		   		FROM docs 
            		LEFT JOIN leasings ON docs.id = leasings.doc_id 
            		ORDER BY docs.id
   		LOOP
-			-- Procházení atributů dokumentu a hledání názvu
+			-- Browsing document attributes to find name
   			FOR a IN SELECT * FROM scandocs(r.id, now()) LOOP
     			IF a.name = '_id' THEN
         			INSERT INTO temp_docs VALUES (r.id, a.value);
@@ -491,23 +490,23 @@ AS $$
         		END IF;
     		END LOOP;
   		END LOOP;
-		-- Vrácení všech informací
+		-- Returning records and removing temporary table
   		RETURN QUERY SELECT * FROM temp_docs ORDER BY temp_docs.name;
   		DROP TABLE temp_docs;
   		RETURN;
 	END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro získání identifikátoru schématu
+-- Funtion for obtaining scheme ID
 CREATE FUNCTION get_scheme_id (doc INTEGER, usr INTEGER, passwd TEXT)
   RETURNS INTEGER
 AS $$
 	DECLARE
     	a RECORD;
 	BEGIN
-		-- Otestování údajů uživatele
+		-- User credentials check
   		PERFORM credentials(usr, passwd);
-		-- Procházení atributů dokumentu a hledání schématu
+		-- Browsing attributes to find scheme
     	FOR a IN SELECT * FROM scandocs(doc, now()) LOOP
         	IF a.name = '_scheme' THEN
             	RETURN cast(substring(a.value from 2 for (char_length(a.value)-1)) as INTEGER);
@@ -518,16 +517,16 @@ AS $$
 	END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro získání názvu dokumentu
+-- Function for obtaining document name
 CREATE FUNCTION get_name (doc INTEGER, usr INTEGER, passwd TEXT)
   RETURNS TEXT
 AS $$
 	DECLARE
     	a RECORD;
 	BEGIN
-		-- Otestování údajů uživatele
+		-- User credentials check
   		PERFORM credentials(usr, passwd);
-		-- Procházení atributů dokumentu a hledání názvu
+		-- Browsing attributes to find a name
     	FOR a IN SELECT * FROM scandocs(doc, now()) LOOP
         	IF a.name = '_id' THEN
             	RETURN a.value;
@@ -538,16 +537,16 @@ AS $$
 	END
 $$ LANGUAGE plpgsql;
 
--- Funkce pro zjištění, zda je dokument odvozen
+-- Function for shadow document check
 CREATE FUNCTION has_shadow (doc INTEGER, usr INTEGER, passwd TEXT)
   RETURNS BOOLEAN
 AS $$
 	DECLARE
     	a RECORD;
 	BEGIN
-		-- Otestování údajů uživatele
+		-- User credentials check
   		PERFORM credentials(usr, passwd);
-		-- Procházení atributů a hledání stínového dokumentu
+		-- Browsing attributes to find shadow
     	FOR a IN SELECT * FROM scandocs(doc, now()) LOOP
         	IF a.name = '_shadow' THEN
             	RETURN TRUE;
@@ -560,5 +559,5 @@ $$ LANGUAGE plpgsql;
 
 ------------------------------------------------------------------------
 
--- Vytvoření prvního uživatele
+-- Creating first user
 SELECT create_first_user('Gandalf');
